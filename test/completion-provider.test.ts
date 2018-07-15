@@ -254,6 +254,19 @@ suite("Autocompletion Tests", () => {
             assert.equal(variables.length, 1);
         });
 
+        test("Autocomplete providers", async () => {
+            let doc = await vscode.workspace.openTextDocument({
+                language: 'terraform',
+                content: 'provider "" "" {}'
+            });
+
+            let successful = await vscode.commands.executeCommand('terraform.index-document', doc.uri) as boolean;
+            assert(successful, "forced indexing not successful");
+
+            let completions = await executeProvider(doc.uri, new vscode.Position(0, 10));
+            assert(completions.items.length > 20, `expected at least 20 providers, but only ${completions.items.length} found`);
+        });
+
         test("Complete resource properties", async () => {
             let doc = await vscode.workspace.openTextDocument({
                 language: 'terraform',
@@ -261,9 +274,6 @@ suite("Autocompletion Tests", () => {
                     '  \n' +
                     '}'
             });
-
-            let successful = await vscode.commands.executeCommand('terraform.index-document', doc.uri) as boolean;
-            assert(successful, "forced indexing not successful");
 
             let completions = await executeProvider(doc.uri, new vscode.Position(1, 2));
             assert.notEqual(completions.items.length, 0, "completions should not be empty");

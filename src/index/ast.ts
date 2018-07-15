@@ -151,15 +151,26 @@ export interface AstItem {
     LineComment: any;
 }
 
-export function getText(token: AstToken, options?: { stripQuotes?: boolean, fallback?: string }): string {
+export function stripQuotes(text: string, options?: { stripQuotes: boolean }): string {
+    if (options && !options.stripQuotes)
+        return text;
+    if (text.length < 2)
+        return text;
+    if (text[0] !== '"' || text[text.length - 1] !== '"')
+        return text;
+    return text.substr(1, text.length - 2);
+}
+
+export function getText(token: AstToken, options?: { stripQuotes: boolean, fallback?: string }): string {
     if (!token) {
         if (options && options.fallback)
             return options.fallback;
         return "";
     }
+
     if (options && options.stripQuotes) {
         if (token.Type === 9) {
-            return token.Text.substr(1, token.Text.length - 2);
+            return stripQuotes(token.Text);
         }
     }
 
@@ -235,7 +246,8 @@ export function findValue(item: AstItem, name?: string): AstVal {
     return value.Val;
 }
 
-export function splitTokenAtPosition(token: AstToken, pos: AstPosition): [string, string] {
+export function splitTokenAtPosition(token: AstToken, pos: AstPosition, options?: { stripQuotes: boolean }): [string, string] {
+    // TODO: look at stripQuotes
     const lineDiff = pos.Line - token.Pos.Line;
     const lines = token.Text.split('\n');
     const lastLine = lines[lines.length - 1];
@@ -309,4 +321,26 @@ export function getTokenAtPosition(ast: Ast, pos: AstPosition, allowedTypes: "AL
         }
     });
     return [found, foundPath];
+}
+
+export type NodeTypeMatcher = "ANY" | NodeType;
+
+export function pathStartsWith(path: VisitedNode[], match: NodeTypeMatcher[]): boolean {
+    if (match.length > path.length)
+        return false;
+
+    let i = 0;
+    for (; i < match.length; i++) {
+        if (match[i] === "ANY")
+            continue;
+        if (path[i].type !== match[i])
+            return false;
+    }
+    return true;
+}
+
+export function matchPath(path: VisitedNode[], match: NodeTypeMatcher[]): boolean {
+    if (match.length !== path.length)
+        return false;
+    return pathStartsWith(path, match);
 }

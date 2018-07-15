@@ -1,13 +1,14 @@
 import * as _ from "lodash";
 import * as vscode from 'vscode';
 import { backwardsSearch } from '../helpers';
-import { AstPosition, getTokenAtPosition } from '../index/ast';
+import { AstItem, AstPosition, AstTokenType, getTokenAtPosition, matchPath, NodeType, splitTokenAtPosition } from '../index/ast';
 import { parseHcl } from '../index/hcl-hil';
 import { IndexAdapter } from "../index/index-adapter";
 import { Section } from "../index/section";
 import { Logger } from "../logger";
 import { Reporter } from "../telemetry";
 import { GetKnownFunctions, InterpolationFunctionDefinition } from './builtin-functions';
+import { CompletionData } from "./completion-data";
 import { allProviders, IFieldDef, terraformConfigAutoComplete } from './model';
 import { SectionCompletions } from './section-completions';
 
@@ -19,7 +20,7 @@ const propertyExp = new RegExp("^([\\w_-]+)$");
 export class CompletionProvider implements vscode.CompletionItemProvider {
   private logger = new Logger("completion-provider");
 
-  constructor(private index: IndexAdapter) { }
+  constructor(private index: IndexAdapter, private completionData: CompletionData) { }
 
   private sectionToCompletionItem(section: Section, needInterpolation: boolean, range?: vscode.Range): vscode.CompletionItem {
     let item = new vscode.CompletionItem(section.id());
@@ -35,8 +36,6 @@ export class CompletionProvider implements vscode.CompletionItemProvider {
     if (range) {
       item.range = range;
     }
-    // sort sections before functions
-    item.sortText = `000-${section.id()}`;
     return item;
   }
 
@@ -63,9 +62,6 @@ export class CompletionProvider implements vscode.CompletionItemProvider {
     if (range) {
       item.range = range;
     }
-    // sort functions after functions
-    item.sortText = `001-${fd.name}`;
-    item.filterText = fd.name;
     return item;
   }
 
@@ -106,15 +102,13 @@ export class CompletionProvider implements vscode.CompletionItemProvider {
       }).concat(...GetKnownFunctions().map((f) => this.knownFunctionToCompletionItem(f, needInterpolation)));
     }
 
-    const wordRangeAtPos = document.getWordRangeAtPosition(position);
     let replaceRange = new vscode.Range(
       position.translate(0, -filter.length),
-      wordRangeAtPos ? document.getWordRangeAtPosition(position).end : position
+      document.getWordRangeAtPosition(position).end
     );
-
-    return group.query("ALL_FILES", { id: { type: "PREFIX", match: filter }, unique: true }).map((s) => {
+    return group.query("ALL_FILES", { id: filter, unique: true }).map((s) => {
       return this.sectionToCompletionItem(s, needInterpolation, replaceRange);
-    }).concat(...GetKnownFunctions().filter(f => f.name.indexOf(filter) === 0).map((f) => this.knownFunctionToCompletionItem(f, needInterpolation, replaceRange)));
+    }).concat(...GetKnownFunctions().map((f) => this.knownFunctionToCompletionItem(f, needInterpolation, replaceRange)));
   }
 
   provideCompletionItems(document: vscode.TextDocument, position: vscode.Position): vscode.CompletionItem[] {
@@ -129,11 +123,45 @@ export class CompletionProvider implements vscode.CompletionItemProvider {
           Offset: 0,
           Filename: ''
         };
-        let token = getTokenAtPosition(ast, pos);
-        if (token) {
-          let interpolationCompletions = this.interpolationCompletions(document, position);
-          if (interpolationCompletions.length !== 0)
-            return interpolationCompletions;
+        let [token, path] = getTokenAtPosition(ast, pos, [AstTokenType.STRING, AstTokenType.HEREDOC], "ANY");
+        if (token && path) {
+          let lastNode = path[path.length - 1];
+          if (matchPath(path, [NodeType.Unknown, NodeType.Node, NodeType.Item])) {
+            // figure out what type of key
+            const item = lastNode.node as AstItem;
+            if (['provider', 'resource', 'data'].indexOf(item.Keys[0].Token.Text) !== -1) {
+              let index = item.Keys.findIndex(k => k.Token === token);
+              if (index === 1) {
+                let [pre, ] = splitTokenAtPosition(token, pos, { stripQuotes: true });
+                if (pre[0] === '"') {
+                  pre = pre.substr(1);
+                }
+                return this.completionData.index.providers.filter(p => p.startsWith(pre)).map(p => {
+                  return new vscode.CompletionItem(p, vscode.CompletionItemKind.Module);
+                });
+              }
+            }
+
+            return [];
+          }
+
+          if (lastNode.type === "VALUE") {
+            let interpolationCompletions = this.interpolationCompletions(document, position);
+            if (interpolationCompletions.length !== 0)
+              return interpolationCompletions;
+          } else if (lastNode.type === "ITEM") {
+            // figure out what type of key
+            const item = lastNode.node as AstItem;
+            if (['provider', 'resource', 'data'].indexOf(item.Keys[0].Token.Text) !== -1) {
+              let index = item.Keys.findIndex(k => k.Token === token);
+              if (index === 1) {
+                const [pre, ] = splitTokenAtPosition(token, pos);
+                return this.completionData.index.providers.filter(p => p.startsWith(pre)).map(p => {
+                  return new vscode.CompletionItem(p, vscode.CompletionItemKind.Module);
+                });
+              }
+            }
+          }
         }
       }
 
@@ -182,37 +210,23 @@ export class CompletionProvider implements vscode.CompletionItemProvider {
         }
 
         if (nestedTypes.length > 0 && parentResource.length > 0) {
-          let resourceInfo = allProviders[parentType][parentResource];
-          if (!resourceInfo) {
-            return [];
-          }
-
-          let temp: any = { items: resourceInfo.args };
+          let temp: any = { items: allProviders[parentType][parentResource].args };
           let fieldArgs: IFieldDef[] = _.cloneDeep(temp).items;
           if (parentType === "resource") {
             fieldArgs.push(...terraformConfigAutoComplete.resource);
           }
-          fieldArgs.push(...resourceInfo.args);
+          fieldArgs.push(...allProviders[parentType][parentResource].args);
           let argumentsLength: number = nestedTypes.length - 1;
           let lastArgName: string = "";
           while (argumentsLength >= 0) {
             const field: IFieldDef = fieldArgs.find((arg) => arg.name === nestedTypes[argumentsLength]);
-            if (!field) {
-              argumentsLength--;
-              continue;
-            }
             fieldArgs = field.args;
             lastArgName = field.name;
             argumentsLength--;
           }
           return this.getItemsForArgs(fieldArgs, lastArgName);
         } else if (parentResource.length > 0) {
-          let resourceInfo = allProviders[parentType][parentResource];
-          if (!resourceInfo) {
-            return [];
-          }
-
-          let temp: any = { items: resourceInfo.args };
+          let temp: any = { items: allProviders[parentType][parentResource].args };
           let fieldArgs: IFieldDef[] = _.cloneDeep(temp).items;
           if (parentType === "resource") {
             fieldArgs.push(...terraformConfigAutoComplete.resource);
@@ -234,7 +248,12 @@ export class CompletionProvider implements vscode.CompletionItemProvider {
     let parts: string[] = lineTillCurrentPosition.split(" ");
     if (parts.length === 2 && (parts[0] === "resource" || parts[0] === "data")) {
       let r: string = parts[1].replace(/"/g, "");
-      let possibleResources: any = _.filter(_.keys(allProviders[parts[0]]), (k: string) => k.indexOf(r) === 0);
+      let regex: RegExp = new RegExp("^" + r);
+      let possibleResources: any = _.filter(_.keys(allProviders[parts[0]]), k => {
+        if (regex.test(k)) {
+          return true;
+        }
+      });
       return possibleResources;
     }
     return [];

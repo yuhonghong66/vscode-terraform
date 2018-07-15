@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { CompletionData, defaultBasePath } from './autocompletion/completion-data';
 import { CompletionProvider } from './autocompletion/completion-provider';
 import { CodeLensProvider } from './codelense';
 import { IndexCommand } from './commands';
@@ -40,6 +41,8 @@ export async function activate(ctx: vscode.ExtensionContext) {
     let indexAdapter = new IndexAdapter(new Index, getConfiguration().indexing.exclude || []);
     ctx.subscriptions.push(indexAdapter);
 
+    let completionData = await CompletionData.create(defaultBasePath);
+
     telemetry.activate(ctx);
     logging.configure(outputChannel);
 
@@ -72,7 +75,7 @@ export async function activate(ctx: vscode.ExtensionContext) {
         new NavigateToSectionCommand(indexAdapter),
 
         // providers
-        vscode.languages.registerCompletionItemProvider(documentSelector, new CompletionProvider(indexAdapter), '.', '"', '{', '(', '['),
+        vscode.languages.registerCompletionItemProvider(documentSelector, new CompletionProvider(indexAdapter, completionData), '.', '"', '{', '(', '['),
         vscode.languages.registerDefinitionProvider(documentSelector, new DefinitionProvider(indexAdapter)),
         vscode.languages.registerDocumentSymbolProvider(documentSelector, new DocumentSymbolProvider(indexAdapter)),
         vscode.languages.registerWorkspaceSymbolProvider(new WorkspaceSymbolProvider(indexAdapter)),
